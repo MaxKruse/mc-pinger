@@ -1,0 +1,4 @@
+data/*.jsonl
+data/*.log
+__pycache__/
+.venv/
