@@ -25,9 +25,10 @@ attribution: target-only failures => server-side; target+control failures
 
 `data/results.jsonl` (current day) + `data/results-YYYY-MM-DD.jsonl`:
 **one JSON object per line, per test, per cycle**. Common fields:
-`ts` (ISO UTC), `epoch` (float seconds), `cycle` (int, resets to 1 on
-container restart - never use cycle numbers as a global sequence; use
-`epoch`), `host`, `port`, `test`.
+`ts` (ISO UTC) - the stable per-cycle identity: every record of a cycle
+(including the `summary`, whose `epoch` is later) shares the cycle's base
+`ts`; `epoch` (float seconds), `cycle` (int, resets to 1 on container
+restart - never a global sequence), `host`, `port`, `test`.
 
 `test` values and their key fields:
 

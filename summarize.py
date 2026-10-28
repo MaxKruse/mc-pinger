@@ -68,15 +68,47 @@ def load_records(dir: str, since: datetime | None, days: float | None) -> list[d
     return recs
 
 
-def cycles(recs: list[dict]) -> dict[int, dict]:
-    """Group test records by cycle number (each cycle shares a ts/epoch)."""
-    out: dict[int, dict] = {}
+def cycles(recs: list[dict]) -> list[dict]:
+    """Group records into cycles.
+
+    Cycle numbers restart at 1 on every process start, so the number alone
+    is not a stable identity. Instead, every record of a cycle - including
+    the summary - carries the cycle's base `ts` string; group by
+    (ts, cycle). Records without a matching ts fall back to the nearest
+    preceding group with the same cycle number (cycle numbers can
+    collide across restarts, so this only salvages, never merges).
+    """
+    groups: list[dict] = []
+    by_key: dict[tuple, dict] = {}
     for r in recs:
-        c = out.setdefault(r.get("cycle", 0), {"epoch": r["epoch"], "tests": {}})
-        c["tests"][r.get("test", "?")] = r
-        if r["epoch"] > c["epoch"]:
-            c["epoch"] = r["epoch"]
-    return out
+        if r.get("test") == "summary":
+            continue
+        key = (r.get("ts"), r.get("cycle", 0))
+        g = by_key.get(key)
+        if g is None:
+            g = {"ts": r.get("ts"), "epoch": r["epoch"],
+                 "cycle": r.get("cycle", 0), "tests": {}}
+            groups.append(g)
+            by_key[key] = g
+        g["tests"][r.get("test", "?")] = r
+        if r["epoch"] > g["epoch"]:
+            g["epoch"] = r["epoch"]
+    groups.sort(key=lambda g: g["epoch"])
+    for r in recs:
+        if r.get("test") != "summary":
+            continue
+        g = by_key.get((r.get("ts"), r.get("cycle", 0)))
+        if g is None:
+            best = None
+            for cand in groups:
+                if cand["cycle"] != r.get("cycle", 0):
+                    continue
+                if 0 <= r["epoch"] - cand["epoch"] < 20 * 60 and (best is None or cand["epoch"] > best["epoch"]):
+                    best = cand
+            g = best
+        if g is not None:
+            g["tests"]["summary"] = r
+    return groups
 
 
 def med(vals: list[float]) -> float | None:
@@ -131,11 +163,11 @@ def print_hour_table(rows: list[dict]) -> None:
               f"{r['tcp_trace_med']!s:>10}")
 
 
-def day_table(cyc: dict[int, dict]) -> None:
+def day_table(cyc: list[dict]) -> None:
     print()
     print("Per-day table:")
     by_day: dict[str, list[dict]] = {}
-    for c in sorted(cyc.values(), key=lambda c: c["epoch"]):
+    for c in sorted(cyc, key=lambda c: c["epoch"]):
         day = datetime.fromtimestamp(c["epoch"], timezone.utc).strftime("%Y-%m-%d")
         by_day.setdefault(day, []).append(c)
     print(f"{'date':<12}{'cycles':>7}  {'target fails':>13}  {'control fails':>14}")
@@ -146,10 +178,10 @@ def day_table(cyc: dict[int, dict]) -> None:
         print(f"{day:<12}{len(cs):>7}  {tf:>13}  {cf:>14}")
 
 
-def failure_windows(cyc: dict[int, dict], tz: timezone) -> None:
+def failure_windows(cyc: list[dict], tz: timezone) -> None:
     print()
     print("Target-unreachable windows (summary.target_ok=false, gap-tolerant grouping):")
-    failed = [c for c in sorted(cyc.values(), key=lambda c: c["epoch"])
+    failed = [c for c in sorted(cyc, key=lambda c: c["epoch"])
               if c["tests"].get("summary", {}).get("target_ok") is False]
     if not failed:
         print("  none - target was reachable in every completed cycle")
