@@ -1,8 +1,8 @@
 # mc-ping-logger
 
-A small Docker app that tests a Minecraft server every 30 minutes and logs
-everything, so you can figure out why it's unreachable in the evening but
-fine at night and early morning.
+A small native Windows app (single exe, no dependencies) that tests a
+Minecraft server every 30 minutes and logs everything, so you can figure
+out why it's unreachable in the evening but fine at night and early morning.
 
 ## What it does
 
@@ -14,7 +14,7 @@ Every 30 minutes (aligned to :00 and :30), it runs this battery against
 | `mc_ping` | A real Minecraft server-list ping: TCP connect, handshake, status request, JSON status response (server version, player count, MOTD). This is the "fake connect" your game client does when browsing servers. Tries the standard modern (1.13+) handshake first, then a pre-1.13 handshake field-order variant (the default target's front-end only answers that one - that is what Prism Launcher sends), then the legacy 0xFE protocol for very old servers. |
 | `tcp_connect` | Bare TCP connect to the port, no payload. Distinguishes "port closed / filtered" from "handshake failed". |
 | `icmp_ping` | 4 ICMP echo packets: packet loss + min/avg/max RTT. |
-| `tcp_trace` | TCP traceroute to the server port (iproute2 `tracepath -T` in the container). Shows exactly which hop starts losing packets or adding latency when you can't connect. |
+| `tcp_trace` | Traceroute to the server (on Windows `tracert`, ICMP only). Shows exactly which hop starts losing packets or adding latency when you can't connect. |
 | `control_icmp` / `control_tcp` | ICMP + TCP to a control host (default `1.1.1.1:443`). If the target fails but the control is fine, the problem is on the server's side of the path; if both fail, it's your own network/ISP. |
 
 Each cycle also writes a plain-English verdict line, e.g.:
@@ -35,29 +35,20 @@ Each cycle also writes a plain-English verdict line, e.g.:
 
 ## How to run it
 
-### Docker
-
-```bash
-docker compose up -d --build
-```
-
-Logs go to `./data/` on the host. No ports are exposed; the container only
-makes outbound connections.
-
-### Native Windows exe (on the host)
-
-The Docker Desktop VM sits in front of your real network path, so for
-cleanest results run the logger directly on the host as an exe:
+Build the exe (one time, and after code changes):
 
 ```powershell
-# build (one time, and after code changes):
 uv run --with pyinstaller python -m PyInstaller --name mc-ping-logger --noconfirm ping_logger.py
+```
 
-# run:
+Then run it:
+
+```powershell
 dist\mc-ping-logger\mc-ping-logger.exe
 ```
 
-The exe is a normal console program (leave the window open while it runs).
+The exe is a normal console program (leave the window open while it
+runs). It makes only outbound connections - it never listens on a port.
 It writes logs to a `data\` folder **next to the executable**, not to the
 folder you launched it from. One-shot test run:
 
@@ -65,7 +56,7 @@ folder you launched it from. One-shot test run:
 $env:MAX_CYCLES="1"; .\dist\mc-ping-logger\mc-ping-logger.exe; Remove-Item Env:MAX_CYCLES
 ```
 
-## Log files (in `./data/`, or `data\` next to the exe for native runs)
+## Log files (in `data\` next to the exe)
 
 | File | Contents |
 | --- | --- |
@@ -78,8 +69,7 @@ Files older than `KEEP_DAYS` (default 90) are deleted automatically.
 
 ## Evaluating the data
 
-After a few days, run the summarizer (works on the host with any Python 3.10+,
-or inside a container):
+After a few days, run the summarizer (any Python 3.10+):
 
 ```bash
 python summarize.py --dir data --tz <your timezone>
@@ -113,7 +103,8 @@ jq -c 'select(.test=="mc_ping" and .ok==false)' data/results*.jsonl
 
 ## Configuration
 
-All settings are environment variables in `docker-compose.yml`:
+All settings are environment variables (set them in the console window
+before starting the exe, or permanently via system environment settings):
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
@@ -121,24 +112,20 @@ All settings are environment variables in `docker-compose.yml`:
 | `INTERVAL_MINUTES` | `30` | Cycle interval; runs align to wall-clock boundaries. |
 | `CONTROL_HOSTS` | `1.1.1.1` | Comma-separated control hosts for the "whose network is it" comparison. |
 | `CONTROL_PORT` | `443` | Port for the control TCP test. |
-| `TZ` | UTC | Timezone for the "next cycle" lines in `docker compose logs` (log files are always UTC). |
 | `KEEP_DAYS` | `90` | Days to keep rotated log files. |
 | `TEST_TIMEOUT_SECONDS` | `10` | Timeout per ping/connect test. |
 | `TRACE_TIMEOUT_SECONDS` | `90` | Timeout for the traceroute. |
 | `MAX_CYCLES` | `0` (forever) | Run N cycles and exit - handy for testing. |
-| `LOG_DIR` | `/data` in the container; `data\` next to the exe natively | Where logs are written. |
+| `LOG_DIR` | `data\` next to the exe | Where logs are written. |
 
 ## If something breaks
 
-- `docker compose logs mc-ping-logger` - startup banner shows target,
-  interval, and container IP/default route.
+- The startup banner (first lines of `data\app.log`) shows target,
+  interval, and control hosts.
 - A crashed cycle is logged (`cycle N crashed: ...`) and the app keeps
   running; it does not exit on test errors.
-- No logs appearing? Check `./data` exists and is writable; the container
-  needs the `NET_RAW` capability (already set in `docker-compose.yml`)
-  for ping/traceroute.
-- The container runs no published ports and holds no state outside
-  `./data/` - `docker compose down && up -d --build` is always safe.
-- **Native exe:** on Windows the trace uses `tracert` (ICMP only - there
-  is no TCP-mode traceroute on Windows), and the "container ip/default
-  route" startup lines are simply absent. Everything else is identical.
+- No logs appearing? The `data\` folder next to the exe is created
+  automatically - check that folder is writable.
+- On Windows the trace uses `tracert` (ICMP only - there is no
+  TCP-mode traceroute on Windows). The ping tests are the ground truth;
+  the trace is the diagnostic.

@@ -17,8 +17,6 @@ attribution: target-only failures => server-side; target+control failures
 | `mc_protocol.py` | Minecraft status ping: varints, modern 1.13+ handshake, pre-1.13 field-order variant, legacy 0xFE fallback. See the Protocol gotcha. |
 | `ping_logger.py` | Orchestrator: scheduler, JSONL/log writing + rotation, verdict logic, `main`. |
 | `summarize.py` | Offline analyzer for `results*.jsonl`: hour-of-day table, per-day table, failure windows, optional CSV. |
-| `Dockerfile` | `python:3.12-alpine` + `iproute2` (ip) + `iputils` (tracepath/TCP traceroute, GNU ping). Modern alpine moved tracepath OUT of iproute2 into iputils - if tracepath is "missing" in the image, iputils is the fix. |
-| `docker-compose.yml` | No published ports. `cap_add: NET_RAW` (required for ping + tracepath). `./data:/data` volume. |
 | `dist/mc-ping-logger/` | PyInstaller build output (git-ignored): native Windows exe. Build: `uv run --with pyinstaller python -m PyInstaller --name mc-ping-logger --noconfirm ping_logger.py`. The frozen exe defaults `LOG_DIR` to a `data/` dir NEXT TO THE EXE (frozen branch in `config.py`), not the CWD. |
 | `README.md` | User-facing: what it does, how to run, how to evaluate. |
 
@@ -28,7 +26,7 @@ attribution: target-only failures => server-side; target+control failures
 **one JSON object per line, per test, per cycle**. Common fields:
 `ts` (ISO UTC) - the stable per-cycle identity: every record of a cycle
 (including the `summary`, whose `epoch` is later) shares the cycle's base
-`ts`; `epoch` (float seconds), `cycle` (int, resets to 1 on container
+`ts`; `epoch` (float seconds), `cycle` (int, resets to 1 on process
 restart - never a global sequence), `host`, `port`, `test`.
 
 `test` values and their key fields:
@@ -85,8 +83,8 @@ cycle, includes full trace hop list.
   when present, else `traceroute -n -w 2 host`, else `tracert -d host`
   (Windows, ICMP-only - no TCP mode). There are TWO incompatible
   `tracepath` implementations: iproute2 (`-T host:port`) and iputils
-  (`-p port host`); modern alpine ships iputils. `_detect_tracepath_style()`
-  in `net_tools.py` probes `tracepath --help` once and caches the flavor.
+  (`-p port host`); `_detect_tracepath_style()` in `net_tools.py` probes
+  `tracepath --help` once and caches the flavor.
 - **Ping output parsing** (`icmp_ping_test`) handles busybox (alpine), GNU,
   English Windows, and German Windows via `_PING_LOSS_RES` / `_PING_RTT_RES`.
   German specifics (verified live): header `Ping-Statistik`, the `(N%
@@ -98,18 +96,12 @@ cycle, includes full trace hop list.
   a working `mc_ping` is a normal state, not a bug. Windows also counts
   ICMP error replies ("Zielnetz nicht erreichbar") as *received*, so 0%
   loss does not always mean the target answered.
-- **Container traceroute only shows the Docker gateway.** The Docker
-  Desktop VM forwards traffic but never answers TTL-expired probes, so
-  inside the container `tcp_trace` resolves hop 1 (172.17.0.1) then
-  "no reply" - a tooling limit, not network loss. The *local* one-shot
-  (`uv run ping_logger.py` on Windows, `tracert`) shows the real path.
-- `cycle` numbers restart after container restarts; `summarize.failure_windows`
+- `cycle` numbers restart after process restarts; `summarize.failure_windows`
   groups by epoch gap (<2h) for exactly this reason.
 - Windows `nul` redirections and `taskkill /IM` are forbidden in this
-  repo's agent rules (see `~/.omp/agent/AGENTS.md`); test the daemon in
-  Docker, not as a local process.
-- Port scheme: this service publishes **no** ports. Never add published
-  ports; the daemon is outbound-only.
+  repo's agent rules (see `~/.omp/agent/AGENTS.md`).
+- This app is outbound-only: it never listens on a port and holds no
+  state outside its log dir. Keep it that way.
 
 ## Testing
 
@@ -119,7 +111,4 @@ cycle, includes full trace hop list.
   dist/mc-ping-logger/mc-ping-logger.exe` (without `LOG_DIR` it writes
   next to the exe). Rebuild the exe after ANY code change before testing
   it.
-- One-shot container cycle: `docker compose run --rm --entrypoint
-  "python -u /app/ping_logger.py" mc-ping-logger` with `MAX_CYCLES=1` in
-  the environment.
 - Summarizer check: `uv run summarize.py --dir data` after any cycle.
