@@ -1,5 +1,5 @@
-"""Minecraft protocol tests: modern (1.13+) status ping with legacy 0xFE
-fallback.
+"""Minecraft protocol tests: modern (1.13+) status ping, pre-1.13
+handshake-order variant, and legacy 0xFE fallback.
 
 The modern ping speaks the real protocol: handshake (state 0 -> 1) followed
 by a status request (state 1 -> 2). The reply is length-prefixed JSON with
@@ -66,11 +66,38 @@ def _read_mc_packet(sock: socket.socket) -> bytes:
     return recv_exact(sock, length)
 
 
-def mc_modern_ping(host: str, port: int, protocol: int) -> dict:
-    """1.13+ status ping: handshake + status request, parse the JSON reply."""
-    res = {"connect_ms": None, "total_ms": None, "server_version": None,
-           "players_online": None, "players_max": None, "motd": None,
-           "ok": False, "error": None, "protocol": "modern"}
+def _read_status_response(sock: socket.socket) -> dict:
+    """Read one status response packet; extract version/players/motd.
+
+    The reply is a length-prefixed JSON string with packet id 0x00, as
+    sent by 1.13+ servers (and by front-ends that forward their status).
+    """
+    packet = _read_mc_packet(sock)
+    _pid, off = varint_decode(packet, 0)  # packet id 0x00
+    data_len, off = varint_decode(packet, off)  # json string length
+    info = json.loads(packet[off:off + data_len].decode("utf-8", "replace"))
+    # A real status payload has version and/or description; anything else
+    # (e.g. a disconnect JSON) means the server did not enter status mode.
+    if "version" not in info and "description" not in info:
+        raise ValueError("reply is not a status response")
+    ver = info.get("version") or {}
+    players = info.get("players") or {}
+    motd = info.get("description")
+    return {"server_version": ver.get("name"),
+            "players_online": players.get("online"),
+            "players_max": players.get("max"),
+            "motd": motd.get("text") if isinstance(motd, dict) else str(motd)}
+
+
+def _new_ping_res(protocol: str) -> dict:
+    return {"connect_ms": None, "total_ms": None, "server_version": None,
+            "players_online": None, "players_max": None, "motd": None,
+            "ok": False, "error": None, "protocol": protocol}
+
+
+def _status_ping(host: str, port: int, protocol: str, handshake: bytes) -> dict:
+    """Send one handshake + status request, parse the status JSON reply."""
+    res = _new_ping_res(protocol)
     try:
         s, conn_ms = _open_tcp(host, port, TEST_TIMEOUT)
     except OSError as e:
@@ -79,25 +106,10 @@ def mc_modern_ping(host: str, port: int, protocol: int) -> dict:
     res["connect_ms"] = round(conn_ms, 1)
     t0 = time.perf_counter()
     try:
-        # handshake: packet id 0x00, next state 2, server address, port,
-        # protocol version.
-        addr_bytes = host.encode("utf-8")
-        handshake = bytes([0x00]) + varint_encode(2) + varint_encode(len(addr_bytes)) \
-            + addr_bytes + struct.pack(">H", port) + varint_encode(protocol)
-        s.sendall(varint_encode(len(handshake)) + handshake)
+        s.sendall(handshake)
         # status request: packet id 0x00, empty body
         s.sendall(varint_encode(1) + b"\x00")
-        packet = _read_mc_packet(s)
-        _pid, off = varint_decode(packet, 0)  # packet id 0x00
-        data_len, off = varint_decode(packet, off)  # json string length
-        info = json.loads(packet[off:off + data_len].decode("utf-8", "replace"))
-        ver = info.get("version") or {}
-        res["server_version"] = ver.get("name")
-        players = info.get("players") or {}
-        res["players_online"] = players.get("online")
-        res["players_max"] = players.get("max")
-        motd = info.get("description")
-        res["motd"] = motd.get("text") if isinstance(motd, dict) else str(motd)
+        res.update(_read_status_response(s))
         res["total_ms"] = round((time.perf_counter() - t0) * 1000.0 + res["connect_ms"], 1)
         res["ok"] = True
     except (OSError, ConnectionError, ValueError, json.JSONDecodeError) as e:
@@ -105,6 +117,45 @@ def mc_modern_ping(host: str, port: int, protocol: int) -> dict:
     finally:
         s.close()
     return res
+
+
+def _modern_handshake(host: str, port: int, version: int) -> bytes:
+    # packet id 0x00, next state 2 (status), server address, port,
+    # protocol version.
+    addr_bytes = host.encode("utf-8")
+    body = bytes([0x00]) + varint_encode(2) + varint_encode(len(addr_bytes)) \
+        + addr_bytes + struct.pack(">H", port) + varint_encode(version)
+    return varint_encode(len(body)) + body
+
+
+def _pre113_handshake(host: str, port: int, version: int) -> bytes:
+    # Pre-1.13 field order: packet id 0x00, protocol version, address,
+    # port, next state 1 (login). The follow-up empty packet 0x00 then
+    # elicits a status reply from front-ends that parse this old order
+    # (see mc_pre113_order_ping).
+    addr_bytes = host.encode("utf-8")
+    body = bytes([0x00]) + varint_encode(version) + varint_encode(len(addr_bytes)) \
+        + addr_bytes + struct.pack(">H", port) + varint_encode(1)
+    return varint_encode(len(body)) + body
+
+
+def mc_modern_ping(host: str, port: int, protocol: int) -> dict:
+    """1.13+ status ping: handshake (state 2) + status request."""
+    return _status_ping(host, port, "modern", _modern_handshake(host, port, protocol))
+
+
+def mc_pre113_order_ping(host: str, port: int, protocol: int) -> dict:
+    """Status ping with the pre-1.13 handshake field order (protocol before
+    next state).
+
+    Some front-ends/proxies in front of modern servers parse the handshake
+    in this old order and only answer status requests in this shape - the
+    default target does; a standard 1.13+ order ping to it gets a clean
+    close. This is the exact byte sequence Prism Launcher's server list
+    sends, and the reply is a standard modern status JSON, so response
+    parsing is shared with mc_modern_ping.
+    """
+    return _status_ping(host, port, "pre113_order", _pre113_handshake(host, port, protocol))
 
 
 def mc_legacy_ping(host: str, port: int) -> dict:
@@ -152,13 +203,19 @@ def mc_legacy_ping(host: str, port: int) -> dict:
 
 
 def mc_ping_test(host: str, port: int) -> dict:
-    """Modern protocol first; fall back to legacy if the server is very old."""
+    """Modern 1.13+ order first, then the pre-1.13 field-order variant
+    (required by some server front-ends), then 0xFE legacy for very old
+    servers. Returns the first attempt that got a status reply."""
     res = mc_modern_ping(host, port, MC_PROTOCOL_VERSION)
     if res["ok"]:
         return res
+    pre113 = mc_pre113_order_ping(host, port, MC_PROTOCOL_VERSION)
+    if pre113["ok"]:
+        return pre113
     legacy = mc_legacy_ping(host, port)
     if legacy["ok"]:
         return legacy
-    # Keep the modern attempt's error; note what legacy saw too
-    res["legacy_error"] = legacy.get("error")
+    # Keep the modern attempt's error; note what the fallbacks saw too
+    res["fallback_errors"] = {"pre113_order": pre113.get("error"),
+                              "legacy": legacy.get("error")}
     return res
