@@ -14,11 +14,12 @@ attribution: target-only failures => server-side; target+control failures
 | --- | --- |
 | `config.py` | All env-var configuration (`TARGET_HOST`, `INTERVAL_MINUTES`, ...). |
 | `net_tools.py` | TCP connect, ICMP ping, traceroute via system tools + locale-tolerant output parsing (German Windows included). |
-| `mc_protocol.py` | Minecraft status ping: varints, modern 1.13+ handshake, legacy 0xFE fallback. |
+| `mc_protocol.py` | Minecraft status ping: varints, modern 1.13+ handshake, pre-1.13 field-order variant, legacy 0xFE fallback. See the Protocol gotcha. |
 | `ping_logger.py` | Orchestrator: scheduler, JSONL/log writing + rotation, verdict logic, `main`. |
 | `summarize.py` | Offline analyzer for `results*.jsonl`: hour-of-day table, per-day table, failure windows, optional CSV. |
 | `Dockerfile` | `python:3.12-alpine` + `iproute2` (ip) + `iputils` (tracepath/TCP traceroute, GNU ping). Modern alpine moved tracepath OUT of iproute2 into iputils - if tracepath is "missing" in the image, iputils is the fix. |
 | `docker-compose.yml` | No published ports. `cap_add: NET_RAW` (required for ping + tracepath). `./data:/data` volume. |
+| `dist/mc-ping-logger/` | PyInstaller build output (git-ignored): native Windows exe. Build: `uv run --with pyinstaller python -m PyInstaller --name mc-ping-logger --noconfirm ping_logger.py`. The frozen exe defaults `LOG_DIR` to a `data/` dir NEXT TO THE EXE (frozen branch in `config.py`), not the CWD. |
 | `README.md` | User-facing: what it does, how to run, how to evaluate. |
 
 ## Data model
@@ -32,8 +33,10 @@ restart - never a global sequence), `host`, `port`, `test`.
 
 `test` values and their key fields:
 
-- `mc_ping`: `ok`, `connect_ms`, `total_ms`, `protocol` ("modern"|"legacy"),
-  `server_version`, `players_online`, `players_max`, `motd`
+- `mc_ping`: `ok`, `connect_ms`, `total_ms`, `protocol`
+  ("modern"|"pre113_order"|"legacy" - which handshake got the reply),
+  `server_version`, `players_online`, `players_max`, `motd`; on total
+  failure plus `fallback_errors` (map of the fallback attempts' errors)
 - `tcp_connect`: `ok`, `ms`
 - `tcp_trace`: `ok` (reached target), `tool`, `hops` (list of
   `{n, addr, ms, reached}`), `hops_count`, `raw` (truncated to 4000 chars)
@@ -61,11 +64,23 @@ cycle, includes full trace hop list.
 
 ## Gotchas
 
-- **Protocol:** `mc_modern_ping` speaks 1.13+ (handshake id 0x00, next
-  state 2, then status request). `MC_PROTOCOL_VERSION` default 769
-  (1.21.x); servers generally accept any version for status. If the target
-  is a pre-1.13 server, `mc_legacy_ping` (0xFE) is the fallback - it
-  returns `protocol: "legacy"`.
+- **Protocol (verified live 2026-10-29):** the front-end in front of the
+  default target (a 1.20.1 Fabric server, MOTD "Homestead Server") does
+  NOT answer the standard 1.13+ status handshake (state 2, modern field
+  order): it accepts the TCP connection, reads the handshake, then closes
+  cleanly with zero bytes (idle connections are kept open, so it is a
+  payload reaction, not a firewall). It DOES answer the pre-1.13 field
+  order (protocol version BEFORE next state, next state 1) followed by a
+  single empty packet 0x00 - the exact byte sequence Prism Launcher's
+  server list sends (`McClient::sendRequest`). Legacy 0xFE also gets
+  closed. Therefore `mc_ping_test` tries in order: `mc_modern_ping` ->
+  `mc_pre113_order_ping` -> `mc_legacy_ping`; the `protocol` field of the
+  record shows which one succeeded (currently "pre113_order"). The
+  pre113 reply sometimes takes ~5s (front-end read timeout) - covered by
+  `TEST_TIMEOUT`. `_read_status_response` rejects non-status JSON
+  (e.g. disconnect packets) so a fallback can't false-positive. If the
+  target ever changes, re-verify all three orderings with a raw socket
+  probe before trusting the data.
 - **Tools differ by platform:** `tcp_trace` picks `tracepath` (TCP mode)
   when present, else `traceroute -n -w 2 host`, else `tracert -d host`
   (Windows, ICMP-only - no TCP mode). There are TWO incompatible
@@ -100,6 +115,10 @@ cycle, includes full trace hop list.
 
 - One-shot local cycle (Windows, uses system tools): `uv run ping_logger.py`
   with `MAX_CYCLES=1 LOG_DIR=data` set.
+- One-shot exe (after a build): `MAX_CYCLES=1 LOG_DIR=data
+  dist/mc-ping-logger/mc-ping-logger.exe` (without `LOG_DIR` it writes
+  next to the exe). Rebuild the exe after ANY code change before testing
+  it.
 - One-shot container cycle: `docker compose run --rm --entrypoint
   "python -u /app/ping_logger.py" mc-ping-logger` with `MAX_CYCLES=1` in
   the environment.

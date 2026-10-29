@@ -11,7 +11,7 @@ Every 30 minutes (aligned to :00 and :30), it runs this battery against
 
 | Test | What it measures |
 | --- | --- |
-| `mc_ping` | A real Minecraft server-list ping: TCP connect, handshake, status request, JSON status response (server version, player count, MOTD). This is the "fake connect" your game client does when browsing servers. Works with modern (1.13+) servers; falls back to the legacy 0xFE protocol for very old ones. |
+| `mc_ping` | A real Minecraft server-list ping: TCP connect, handshake, status request, JSON status response (server version, player count, MOTD). This is the "fake connect" your game client does when browsing servers. Tries the standard modern (1.13+) handshake first, then a pre-1.13 handshake field-order variant (the default target's front-end only answers that one - that is what Prism Launcher sends), then the legacy 0xFE protocol for very old servers. |
 | `tcp_connect` | Bare TCP connect to the port, no payload. Distinguishes "port closed / filtered" from "handshake failed". |
 | `icmp_ping` | 4 ICMP echo packets: packet loss + min/avg/max RTT. |
 | `tcp_trace` | TCP traceroute to the server port (iproute2 `tracepath -T` in the container). Shows exactly which hop starts losing packets or adding latency when you can't connect. |
@@ -35,6 +35,8 @@ Each cycle also writes a plain-English verdict line, e.g.:
 
 ## How to run it
 
+### Docker
+
 ```bash
 docker compose up -d --build
 ```
@@ -42,7 +44,28 @@ docker compose up -d --build
 Logs go to `./data/` on the host. No ports are exposed; the container only
 makes outbound connections.
 
-## Log files (in `./data/`)
+### Native Windows exe (on the host)
+
+The Docker Desktop VM sits in front of your real network path, so for
+cleanest results run the logger directly on the host as an exe:
+
+```powershell
+# build (one time, and after code changes):
+uv run --with pyinstaller python -m PyInstaller --name mc-ping-logger --noconfirm ping_logger.py
+
+# run:
+dist\mc-ping-logger\mc-ping-logger.exe
+```
+
+The exe is a normal console program (leave the window open while it runs).
+It writes logs to a `data\` folder **next to the executable**, not to the
+folder you launched it from. One-shot test run:
+
+```powershell
+$env:MAX_CYCLES="1"; .\dist\mc-ping-logger\mc-ping-logger.exe; Remove-Item Env:MAX_CYCLES
+```
+
+## Log files (in `./data/`, or `data\` next to the exe for native runs)
 
 | File | Contents |
 | --- | --- |
@@ -103,7 +126,7 @@ All settings are environment variables in `docker-compose.yml`:
 | `TEST_TIMEOUT_SECONDS` | `10` | Timeout per ping/connect test. |
 | `TRACE_TIMEOUT_SECONDS` | `90` | Timeout for the traceroute. |
 | `MAX_CYCLES` | `0` (forever) | Run N cycles and exit - handy for testing. |
-| `LOG_DIR` | `/data` | Where logs are written inside the container. |
+| `LOG_DIR` | `/data` in the container; `data\` next to the exe natively | Where logs are written. |
 
 ## If something breaks
 
@@ -116,3 +139,6 @@ All settings are environment variables in `docker-compose.yml`:
   for ping/traceroute.
 - The container runs no published ports and holds no state outside
   `./data/` - `docker compose down && up -d --build` is always safe.
+- **Native exe:** on Windows the trace uses `tracert` (ICMP only - there
+  is no TCP-mode traceroute on Windows), and the "container ip/default
+  route" startup lines are simply absent. Everything else is identical.
