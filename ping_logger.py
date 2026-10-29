@@ -13,7 +13,7 @@ Test battery per cycle:
                   legacy 0xFE fallback). Records protocol version,
                   player count, MOTD. Most diagnostic test.
   tcp_connect   - raw TCP connect to the port, latency in ms.
-  icmp_ping     - ICMP ping (needs NET_RAW in containers), loss % + RTT.
+  icmp_ping     - ICMP ping, loss % + RTT.
   tcp_trace     - TCP traceroute to the port (tracepath -T / -p), the hop
                   list shows WHICH router on the path stops answering.
   control_*     - the same icmp/tcp tests against CONTROL_HOSTS
@@ -216,12 +216,16 @@ def print_startup() -> None:
     write_log_line(f"===== mc-ping-logger started (pid {os.getpid()}) =====")
     write_log_line(f"target={TARGET_HOST}:{TARGET_PORT} interval={INTERVAL_MIN}min "
                    f"controls={CONTROL_HOSTS} mc_protocol={MC_PROTOCOL_VERSION} keep_days={KEEP_DAYS}")
-    rc, out, _ = run_cmd(["hostname", "-i"], 5.0)
+    rc, out, _ = run_cmd(["hostname"], 5.0)
     if rc == 0 and out.strip():
-        write_log_line(f"container ip: {out.strip()}")
-    rc, out, _ = run_cmd(["ip", "route", "show", "default"], 5.0)
-    if rc == 0 and out.strip():
-        write_log_line(f"default route: {out.strip()}")
+        write_log_line(f"host: {out.strip()}")
+    rc, out, _ = run_cmd(["ipconfig"], 5.0)
+    # locale-tolerant: matches English ("IPv4 Address", "Default Gateway")
+    # and German ("IPv4-Adresse", "Standardgateway") output
+    for line in out.splitlines():
+        s = line.strip()
+        if s.startswith("IPv4") or "gateway" in s.lower():
+            write_log_line(f"  {s}")
 
 
 def main() -> int:
