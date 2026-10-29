@@ -3,10 +3,16 @@
 All knobs are environment variables; see README.md for the full list and
 defaults.
 """
-
 import os
+import sys
 
-LOG_DIR = os.environ.get("LOG_DIR", "/data" if os.path.isdir("/data") else "data")
+if getattr(sys, "frozen", False):
+    # PyInstaller exe: default to a "data" dir next to the executable, not
+    # the shell CWD (which is arbitrary when launched from Explorer).
+    _DEFAULT_LOG_DIR = os.path.join(os.path.dirname(os.path.abspath(sys.executable)), "data")
+else:
+    _DEFAULT_LOG_DIR = "/data" if os.path.isdir("/data") else "data"
+LOG_DIR = os.environ.get("LOG_DIR", _DEFAULT_LOG_DIR)
 TARGET_HOST = os.environ.get("TARGET_HOST", "169.155.120.31")
 TARGET_PORT = int(os.environ.get("TARGET_PORT", "9080"))
 INTERVAL_MIN = int(os.environ.get("INTERVAL_MINUTES", "30"))

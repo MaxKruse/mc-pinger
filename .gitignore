@@ -2,3 +2,6 @@ data/*.jsonl
 data/*.log
 __pycache__/
 .venv/
+dist/
+build/
+*.spec
